@@ -1,0 +1,318 @@
+---
+title: "NYPD Shooting Incident Data"
+author: "C.Ifill"
+date: "2025-01-18"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Dataset
+
+The data we will be looking into today is the list of identified NYPD shooting incidents from 2006 up to 2023. The data can be retrieved from this file: <https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD>
+
+``` {r package_identifyer}
+
+library(tidyverse)
+library(dplyr)
+library(randomForest)
+```
+
+``` {r import_clean}
+#pull the flat file for analysis
+nypd_data <- read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+
+#remove unnecessary columns
+nypd_data <- nypd_data %>% 
+  select(-(X_COORD_CD : Lon_Lat),-INCIDENT_KEY, -LOC_OF_OCCUR_DESC, -LOC_CLASSFCTN_DESC, -LOCATION_DESC)
+
+#format the OCCUR_DATE into date
+nypd_data$OCCUR_DATE <- mdy(nypd_data$OCCUR_DATE)
+
+#create two new columns called year and week, both based on OCCUR_DATE
+nypd_data <- nypd_data %>% 
+  mutate(occur_year = format(OCCUR_DATE, "%Y")) %>% 
+  mutate(occur_week = week(OCCUR_DATE))
+
+#create vector of columns to reformat and convert them to factors
+to_factor <- c("BORO", "PRECINCT", "PERP_AGE_GROUP", "PERP_SEX", "PERP_RACE","VIC_AGE_GROUP", "VIC_SEX", "VIC_RACE", "occur_year", "occur_week")
+nypd_data[to_factor] <- lapply(nypd_data[to_factor], factor)
+
+```
+
+Here is a summary of the data:
+``` {r summary_w_empties}
+summary(nypd_data)
+
+```
+
+
+### Missing/Erroneous Data
+
+There was one instance in the data where the victim's age was 1022. I assumed it was a typo and removed it from the data.
+
+There are missing values from perp's race, age and sex. I decided to leave those values as it may be that the perpetrators we never identified.
+
+The missing values in victim's sex and age were removed. The data may be missing/unknown as a body was never recovered, but reason for unknown is not pertinent. I left the missing values victim's race as it may be difficult to determine on a corpse.
+
+
+``` {r clean_further}
+
+#remove unwanted rows: erroneous and missing data
+nypd_data <- nypd_data %>% filter(!VIC_AGE_GROUP %in% c('1022'), !VIC_SEX %in% c('U'), !VIC_AGE_GROUP %in% c('UNKNOWN'))
+
+```
+
+
+## Visuals
+
+``` {r line_graph, fig.width = 12}
+#create dataframe week_year_count that is a summary of the original data but count the deaths by week by year
+Week_year_counts <- nypd_data %>%
+  filter(as.numeric(format(OCCUR_DATE, "%Y")) <= as.numeric(max(format(OCCUR_DATE, "%Y"))) & as.numeric(format(OCCUR_DATE, "%Y")) >= as.numeric(max(format(OCCUR_DATE, "%Y")))-5) %>%
+  group_by(occur_year, occur_week) %>%
+  count()
+
+#plot week_year_counts for 2018 to 2023
+ggplot(Week_year_counts, aes(x = occur_week, y = n, group = occur_year, colour = occur_year)) + 
+  geom_line(linewidth = 1) + 
+  ggtitle("Shooting Deaths by Week") + 
+  xlab("Week Num") + 
+  ylab("Number of Deaths") + 
+  scale_color_brewer(palette="Set1") + 
+  labs(caption = "Fig. 1: Shooting deaths identified by the NYPD for every week from 2018 up to the end of 2023.", fill = "Year") +
+  theme(plot.caption.position = "panel", plot.caption = element_text(hjust = 0, size = "9", colour = "black", face = "italic"), plot.title = element_text(hjust = 0.5))
+```
+
+``` {r line_graph_smooth, fig.width = 12}
+
+#add a loess curve to the previous line graph
+ggplot(Week_year_counts, aes(x = occur_week, y = n, group = occur_year, colour = occur_year)) + 
+  geom_point() + 
+  geom_smooth(se = FALSE, span = 0.6) +  
+  ggtitle("Shooting Deaths by Week (Smoothed)") + 
+  xlab("Week Num") + 
+  ylab("Number of Deaths") + 
+  scale_color_brewer(palette="Set1") + 
+  labs(caption = "Fig. 2: Applied the 'loess' smoothing to the data displayed in fig.1.", fill = "Year") +
+  theme(plot.caption.position = "panel", plot.caption = element_text(hjust = 0, size = "9", colour = "black", face = "italic"), plot.title = element_text(hjust = 0.5))
+
+```
+
+``` {r barGraph, fig.width = 7, fig.height = 4}
+
+#create new dataframe that groups original data by victim race
+race_spread_vic <- nypd_data %>% 
+  group_by(VIC_RACE) %>% 
+  count() %>% 
+  ungroup() %>% 
+  mutate(perc = `n` / sum(`n`)) %>% 
+  arrange(perc) %>%
+  mutate(labels = scales::percent(perc))
+
+#plot a bar graph of the deaths by race by borough
+ggplot(nypd_data, aes(x = BORO, fill = VIC_RACE)) + 
+  geom_bar() + 
+  ggtitle("Shooting Deaths by Borough") + 
+  xlab("Borough") + 
+  ylab("Number of Deaths") + 
+  guides(fill = guide_legend(title = "Victim Race")) + 
+  labs(caption = "Fig. 3: Shooting deaths identified by the NYPD grouped by borough") + 
+  theme(axis.text=element_text(size=7), plot.caption.position = "panel", plot.caption = element_text(hjust = 0, size = "7", colour = "black", face = "italic"), plot.title = element_text(hjust = 0.5))  
+
+```
+
+
+``` {r vic_vals}
+
+#return the values for the deaths in the Bronx and Brooklyn boroughs
+bronx_vics <- nypd_data %>%
+  filter(BORO == "BRONX") %>%
+  count()
+
+brook_vics <- nypd_data %>%
+  filter(BORO == "BROOKLYN") %>%
+  count()
+
+#return the single value for the overall percentage of black victims
+vic_black_perc <- round(race_spread_vic$perc[race_spread_vic$VIC_RACE == "BLACK"]*100,0)
+```
+
+
+## Model  and Analysis
+
+``` {r death_values}
+
+#create dataframe that groups original data by occurrence year and provides the volume and percentage of deaths
+deathsBy_year <- nypd_data %>% 
+  group_by(occur_year) %>% 
+  count( name = "Volume") %>% 
+  ungroup() %>% 
+  mutate(deci = `Volume` / sum(`Volume`)) %>% 
+  arrange(deci) %>%
+  mutate(Percentage = scales::percent(deci)) %>%
+  select(-deci) %>%
+  arrange(occur_year)
+
+#create dataframe that groups original data by victims' sex and provides the volume and percentage of deaths
+deathsBy_sex <- nypd_data %>%
+    group_by(VIC_SEX, VIC_AGE_GROUP) %>%
+    count() %>%
+    ungroup() %>% 
+    mutate(deci = `n` / sum(`n`)) %>% 
+    arrange(deci) %>%
+    mutate(Percentage = scales::percent(deci))
+    
+```
+
+Based on Fig 2, we see the shooting deaths over the year loosely follows a shallow concave down parabola. The first year of the COVID-19 pandemic in 2020 had a sharper increase in shooting deaths leading into the middle of the year. When we look at the total deaths for 2019 (`r deathsBy_year$n[deathsBy_year$occur_year == "2019"]`) compared to the total deaths in 2020 (`r prettyNum(deathsBy_year$n[deathsBy_year$occur_year == "2020"], big.mark = ",")`), there is a two-fold jump in numbers, even as the lockdown was in effect.If we only look at the graph, we might conclude As of 2021, shooting deaths are slowly returning to pre-pandemic volume (see 2023 in yellow versus 2019 in blue).
+
+However, taking count of all the years available in the dataset:
+
+``` {r YoY_perc}
+#put deaths_by_year into a simple table format
+knitr::kable(deathsBy_year, "simple")
+```
+
+We can identify that the volume of 2017-2019 were actually the low years compared to years preceding. If anything, the shooting deaths were returning to a more regular volume. I would be very interesting to further investigate what occurred in 2017-2019 that influenced the data.
+
+Grouping the shooting by the sex of the victims, we see an overwhelming `r round(sum(deathsBy_sex$deci[deathsBy_sex$VIC_SEX == "M"]) * 100,0)`% of victims were male. `r round(sum(deathsBy_sex$deci[deathsBy_sex$VIC_AGE_GROUP == "25-44"]) * 100,0)`% of the victims were in the 25-44 age group regardless of gender. 
+
+Per fig 3, we see the two worst boroughs are the Bronx and Brooklyn (`r prettyNum(bronx_vics, big.mark = ",")` and `r prettyNum(brook_vics, big.mark = ",")` respectively), and a significant portion of the overall victims (approximately `r vic_black_perc`%) were identified as Black.
+
+I applied the Random Forest model to the 2023 data and used the week number, borough, victim age group and victim race as features to predict the volume of deaths by week. The following is the predicted data (in red) compared to the true data (blue):
+
+``` {r randFor_model}
+
+#filter the original data for 2023 only and provide the death volume by week
+deathsBy_week_2023 <- nypd_data %>% 
+  filter(occur_year == "2023") %>%
+  group_by(occur_week, BORO, VIC_AGE_GROUP, VIC_RACE) %>% 
+  count( name = "volume")
+
+#ensure the data is reproducible and create the random forest model
+set.seed(1)
+
+model <- randomForest( formula = volume ~ ., data = deathsBy_week_2023)
+
+deathsBy_week_2023$pred <- predict(model)
+
+#re-apply the group-by to the deathsBy_week for easier model comparison
+deathsBy_week_2023 <- deathsBy_week_2023 %>%
+  group_by(occur_week) %>%
+  summarise(volume_val = sum(volume), pred_val = sum(pred))
+
+```
+
+``` {r model_graph, fig.width = 12}
+
+#plot the comparison or predictions vs actuals
+deathsBy_week_2023 %>% ggplot() + 
+  geom_line(aes(x = occur_week, y = volume_val, , group = 1), colour = "blue") + 
+  geom_line(aes(x = occur_week, y = pred_val, group = 1), colour = "red") +
+  ggtitle("Shooting Deaths in 2023 vs. Predictive Model") + 
+  xlab("Week Num") + 
+  ylab("Number of Deaths") +
+  theme(plot.title = element_text(hjust = 0.5))
+``` 
+
+## Identified Biases and Conclusion
+
+The first and immediately identifiable bias I encountered was wanting to focus only on the ethnicity and age group I belong to. I wanted to know more about the other me, the imaginary me in the victims. I avoided that by sticking to the general stats, giving a little bit of everything so that my follow-up questions would not be based on one group and I found myself asking questions I would not have thought of had I followed my original plan. this is **Group Attribution Bias**
+
+Before the data even comes to me, it may already contain biases:
+
+ * **Selection Bias**: If a certain precinct has more consistent death reporting, it may skew the data towards them or the area they patrol. 
+ 
+ * **Overgeneralization Bias**: Population information, like if a certain area only has one ethnicity, we can't conclude based only on the data that the other ethnicities are "safe".
+
+We cannot know based on the data alone what is the cause for the deaths. We were able to identify the worst areas, however, leading to possible counter measures in the future. 
+
+## Takeaways
+
+This was an interesting exercise, especially without a clear direction or goal (which is coincidentally a way to avoid analysis bias). Just being able to group and manipulate the data not necessarily to tell a story, but to put together the building blocks to tell a story later on has been fun.
+
+## Appendix
+
+### Session Info
+
+``` {r session_info}
+sessionInfo()
+```
+
+### Sites Used for Coding
+
+
+How to remove columns: 
+
+* <https://www.statology.org/remove-columns-in-r/>
+
+Convert Char date into Date date: 
+
+* <https://www.statology.org/lubridate-convert-character-to-date/>
+
+Return the week number from a date: 
+
+* <https://stackoverflow.com/questions/22439540/how-to-get-week-numbers-from-dates>
+
+Extract year from date:
+
+* <https://stackoverflow.com/questions/22439540/how-to-get-week-numbers-from-dates>>
+
+Convert multiple columns to factor data type: 
+
+* <https://stackoverflow.com/questions/33180058/coerce-multiple-columns-to-factors-at-once>
+
+Group_by and Filter: 
+
+* <https://www.statology.org/group-by-multiple-columns-in-r/>
+* <https://www.statology.org/dplyr-group-by-filter/>
+* <https://www.statology.org/filter-rows-r/>
+
+Remove rows based on condition:
+
+* <https://www.statology.org/r-filter-in/>
+
+Help with barplot: 
+
+* <https://r-charts.com/ranking/bar-plot-ggplot2/>
+* <https://stackoverflow.com/questions/14942681/change-size-of-axes-title-and-labels-in-ggplot2>
+* Caption:
+  * <https://r-charts.com/ggplot2/titles/>
+  * <https://www.statology.org/ggplot-caption/>
+  
+Output variable value in paragraph:
+
+* <https://stackoverflow.com/questions/10902504/r-markdown-accessing-variable-from-code-chunk-variable-scope>
+  * Add thousand separator <https://www.geeksforgeeks.org/comma-separator-for-numbers-in-r/>
+  
+Extract value from column based on another:
+
+* <https://stackoverflow.com/questions/42176647/extract-value-from-data-frame-column-based-on-another-column>
+
+Help with line graph:
+
+* <https://r-charts.com/evolution/line-graph-ggplot2/>
+* <https://r-charts.com/evolution/line-graph-multiple-lines-ggplot2/>
+* <https://forum.posit.co/t/problems-with-a-simple-line-graph/75630/3>
+* <https://stackoverflow.com/questions/67200484/grid-arrange-side-by-side-plots-being-squished-to-small-size-in-r-markdown>
+* <https://www.geeksforgeeks.org/how-to-change-colors-in-ggplot2-line-plot-in-r/>
+* <https://r-graph-gallery.com/38-rcolorbrewers-palettes.html>
+* <https://stackoverflow.com/questions/14794599/how-to-change-line-width-in-ggplot> *Replace "size" with "linewidth"*
+* <https://stackoverflow.com/questions/42338871/what-does-the-span-argument-control-in-geom-smooth>
+* <https://www.statology.org/loess-regression-in-r/>
+* <https://stackoverflow.com/questions/27082601/ggplot2-line-chart-gives-geom-path-each-group-consist-of-only-one-observation>
+
+Using Random Forest:
+
+* <https://www.statology.org/how-to-implement-random-forests-r/>
+* <https://www.statology.org/train-test-split-r/>
+* <https://www.statology.org/random-forest-in-r/>
+
+Put a DataFrame in simple table format:
+
+* <https://bookdown.org/yihui/rmarkdown-cookbook/kable.html>
+
